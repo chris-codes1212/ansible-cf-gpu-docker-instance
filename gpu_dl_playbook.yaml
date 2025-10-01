@@ -1,0 +1,104 @@
+# dl_playbook.yml
+- name: Launch and configure a deep learning gpu instance
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    stack_name: "DL-gpu"
+    template_file: "gpu_dl_template.yaml"
+    instance_type: "g4dn.xlarge" # GPU instance
+    ami_id: "ami-0f16469015c6308ff" # Deep Learning OSS Nvidia Driver AMI GPU TensorFlow 2.18 (Ubuntu 22.04)
+    key_pair_name: "dl_c5_ssh" # Replace with your EC2 Key Pair name
+
+  tasks:
+    - name: Launch CloudFormation stack
+      amazon.aws.cloudformation:
+        stack_name: "{{ stack_name }}"
+        state: present
+        region: "us-east-1" # Specify your AWS region
+        template: "{{ template_file }}"
+        template_parameters:
+          InstanceType: "{{ instance_type }}"
+          KeyPairName: "{{ key_pair_name }}"
+          AmiId: "{{ ami_id }}"
+      register: stack_output
+
+    - name: Get instance public IP from stack output
+      set_fact:
+        instance_public_ip: "{{ stack_output.stack_outputs.InstancePublicIp }}"
+
+    - name: Add new instance to inventory
+      add_host:
+        name: "{{ instance_public_ip }}"
+        groups: deeplearning_instances
+        ansible_user: "ubuntu" # Default user for Amazon Linux AMIs
+        ansible_ssh_private_key_file: "{{ key_pair_name }}.pem"
+
+    - name: Pause for 30 seconds
+      ansible.builtin.pause:
+        seconds: 30
+
+- name: Configure the deep learning instance
+  hosts: deeplearning_instances
+  become: yes
+  gather_facts: yes
+  vars:
+    jupyter_password: ""
+
+  tasks:
+    - name: Ensure Python development tools are installed
+      ansible.builtin.apt:
+        name: python3-dev
+        state: present
+
+    - name: Install TensorFlow
+      pip:
+        name: tensorflow
+        state: present
+        executable: pip3
+
+    - name: Install Jupyter and dependencies
+      pip:
+        name: jupyter
+        state: present
+        executable: pip3
+
+    - name: Install other python packages
+      pip:
+        name: 
+          - pandas
+          - matplotlib
+          - numpy
+          - seaborn
+        state: present
+        executable: pip3
+      ignore_errors: yes
+
+    - name: Generate Jupyter configuration
+      command: "jupyter notebook --generate-config --allow-root"
+      args:
+        creates: "/home/ubuntu/.jupyter/jupyter_notebook_config.py"
+      become: yes
+      become_user: "ubuntu"
+
+    - name: Set Jupyter password
+      lineinfile:
+        path: "/home/ubuntu/.jupyter/jupyter_notebook_config.py"
+        line: "c.NotebookApp.password = '{{ jupyter_password }}'"
+      become: yes
+      become_user: "ubuntu"
+
+    - name: Configure Jupyter to listen on all interfaces
+      lineinfile:
+        path: "/home/ubuntu/.jupyter/jupyter_notebook_config.py"
+        line: "c.NotebookApp.ip = '0.0.0.0'"
+        insertafter: "^#c.NotebookApp.ip"
+      become: yes
+      become_user: "ubuntu"
+
+    - name: Run Jupyter Notebook as a background service
+      ansible.builtin.shell: "nohup jupyter notebook --no-browser --port=8888 &"
+      args:
+        chdir: "/home/ubuntu"
+      become: yes
+      become_user: "ubuntu"
